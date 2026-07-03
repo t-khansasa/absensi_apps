@@ -77,10 +77,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Future<void> _loadFaceRegistrationStatus() async {
     final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _isFaceRegistered = prefs.getBool(_keyRegistered) ?? false;
+    final token = prefs.getString(AppConstants.tokenKey);
+    if (token == null) return;
+
+    try {
+      final response = await http.get(
+        Uri.parse('${AppConstants.baseUrl}/face-embedding'),
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Accept': 'application/json',
+        },
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _isFaceRegistered = response.statusCode == 200;
+      });
+
+      // Ambil tanggal dari cache lokal kalau ada (opsional, cuma buat tampilan)
       _registeredDate = prefs.getString(_keyDate);
-    });
+    } catch (e) {
+      debugPrint('Gagal cek status wajah di profile: $e');
+    }
   }
 
   Future<void> _loadProfilePhoto() async {
@@ -473,11 +491,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [
-              Color(0xFF0A2246),
-              Color(0xFF1D4461),
-              Color(0xFF90CAF9),
-            ],
+            colors: [Color(0xFF0A2246), Color(0xFF1D4461), Color(0xFF90CAF9)],
             stops: [0.0, 0.45, 1.0],
           ),
         ),
@@ -611,7 +625,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               width: 36,
                               height: 36,
                               decoration: BoxDecoration(
-                                color: const Color(0xFF1D4461).withOpacity(0.15),
+                                color: const Color(
+                                  0xFF1D4461,
+                                ).withOpacity(0.15),
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               child: const Icon(
