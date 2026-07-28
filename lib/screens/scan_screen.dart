@@ -494,12 +494,6 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   /// Ambil tenantId & userId dari data user yang tersimpan di SharedPreferences
-  /// (disimpan saat login oleh AuthService sebagai JSON di bawah AppConstants.userKey).
-  ///
-  /// CATATAN: nama field company/tenant di bawah ini (company_id, tenant_id, dst)
-  /// masih tebakan berdasarkan pola umum. Cek hasil debugPrint('USER OBJECT: ...')
-  /// di terminal saat login untuk konfirmasi nama field yang benar, lalu sesuaikan
-  /// urutan pencarian di bawah kalau perlu.
   Future<Map<String, String>> _getUserContext() async {
     final prefs = await SharedPreferences.getInstance();
     final userJson = prefs.getString(AppConstants.userKey);
@@ -513,10 +507,8 @@ class _ScanScreenState extends State<ScanScreen> {
 
       final userId = user['id']?.toString() ?? 'unknown_user';
 
-      final tenantId = user['company_id']?.toString() ??
-          user['tenant_id']?.toString() ??
-          (user['company'] is Map ? user['company']['id']?.toString() : null) ??
-          (user['tenant'] is Map ? user['tenant']['id']?.toString() : null) ??
+      final tenantId = user['company']?.toString() ??
+          user['tenant']?.toString() ??
           'unknown_tenant';
 
       return {'tenantId': tenantId, 'userId': userId};
@@ -560,6 +552,7 @@ class _ScanScreenState extends State<ScanScreen> {
     );
   }
 
+  // ── PERBAIKAN DI SINI: Menambahkan accuracy, accuracy_in, dan accuracy_out ──
   Future<bool> _sendAttendance(XFile image, Position position) async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString(AppConstants.tokenKey);
@@ -576,9 +569,15 @@ class _ScanScreenState extends State<ScanScreen> {
 
     request.headers['Authorization'] = 'Bearer $token';
     request.headers['Accept'] = 'application/json';
+    
     request.fields['latitude'] = position.latitude.toString();
     request.fields['longitude'] = position.longitude.toString();
+    
+    // ✅ Mengirimkan nilai akurasi lokasi ke field accuracy_in dan accuracy_out
     request.fields['accuracy'] = position.accuracy.toString();
+    request.fields['accuracy_in'] = position.accuracy.toString();
+    request.fields['accuracy_out'] = position.accuracy.toString();
+    
     request.fields['face_verified'] = _faceDetected ? '1' : '0';
     request.files.add(await http.MultipartFile.fromPath('image', image.path));
 
@@ -965,7 +964,6 @@ class _ScanScreenState extends State<ScanScreen> {
                         ),
                       ),
 
-                      // ── PERUBAHAN 4: Progress bar pakai _stableFrameThreshold ──
                       if (_faceDetected && !_isSubmitting) ...[
                         const SizedBox(height: 14),
                         Padding(
