@@ -5,9 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
 import '../utils/constants.dart';
 import 'login_page.dart';
+import '../services/verification_log_service.dart';
 
 class ProfileScreen extends StatefulWidget {
   final Map<String, dynamic> userData;
@@ -19,6 +19,7 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
+  final VerificationLogService _logService = VerificationLogService();
   bool _isFaceRegistered = false;
   String? _registeredDate;
   String? _profileImagePath;
@@ -694,6 +695,39 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                   fontWeight: FontWeight.w500,
                                 ),
                               ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.85),
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                'Export Log Pengujian (Debug)',
+                                style: TextStyle(
+                                  color: _cardTextPri,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(
+                                Icons.upload_file,
+                                color: _cardIconColor,
+                              ),
+                              tooltip: 'Export log CSV',
+                              onPressed: () async {
+                                await _logService.exportLog();
+                              },
                             ),
                           ],
                         ),

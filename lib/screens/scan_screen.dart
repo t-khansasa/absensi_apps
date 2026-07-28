@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -15,6 +16,9 @@ import 'dart:io';
 /// Hasil verifikasi wajah, dipisah supaya pesan error ke user lebih akurat
 /// (membedakan "belum registrasi" vs "wajah tidak cocok").
 enum FaceVerifyResult { match, notRegistered, mismatch, skipped }
+
+/// Tahapan liveness detection: kedip mata -> geleng kiri -> geleng kanan -> selesai
+enum LivenessStep { blink, turnLeft, turnRight, completed }
 
 class ScanScreen extends StatefulWidget {
   const ScanScreen({super.key});
@@ -47,11 +51,18 @@ class _ScanScreenState extends State<ScanScreen> {
   int _stableFaceFrames = 0;
   static const int _stableFrameThreshold = 15;
 
-  // ── Liveness detection: deteksi kedipan mata ──
+  // ── Liveness detection: blink + head movement ──
   bool _livenessVerified = false;
+  LivenessStep _currentLivenessStep = LivenessStep.blink;
+
   int _blinkCount = 0;
   bool _eyesWereClosed = false;
   static const int _blinkThreshold = 1; // minimal 1x kedip
+
+  // Threshold sudut kepala dalam derajat (headEulerAngleY = yaw, kiri-kanan)
+  static const double _headTurnThreshold = 15.0;
+  bool _headTurnLeftDone = false;
+  bool _headTurnRightDone = false;
 
   bool _isCheckingLocation = true;
   bool _isInsideRadius = false;
@@ -62,6 +73,9 @@ class _ScanScreenState extends State<ScanScreen> {
   double _allowedRadiusMeters = 100.0;
 
   Position? _currentPosition;
+
+  // ── Geolocator real-time ──
+  StreamSubscription<Position>? _positionStream;
 
   @override
   void initState() {
@@ -162,6 +176,7 @@ class _ScanScreenState extends State<ScanScreen> {
             "Lokasi kantor tidak tersedia, absensi diizinkan.";
       });
       await _initCamera();
+      _startPositionStream();
       return;
     }
 
@@ -186,6 +201,7 @@ class _ScanScreenState extends State<ScanScreen> {
 
     if (inside) {
       await _initCamera();
+      _startPositionStream(); // ── mulai tracking lokasi real-time ──
     } else {
       // ── Auto-kembali ke beranda kalau di luar radius kantor ──────────
       _showError(_locationStatusMessage);
@@ -193,6 +209,50 @@ class _ScanScreenState extends State<ScanScreen> {
       if (!mounted) return;
       Navigator.pop(context);
     }
+  }
+
+  /// Mulai memantau posisi user secara real-time selama proses scan
+  /// berlangsung. Kalau user keluar radius kantor di tengah proses,
+  /// absensi otomatis dibatalkan.
+  void _startPositionStream() {
+    const locationSettings = LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 5, // update tiap user bergerak 5 meter
+    );
+
+    _positionStream =
+        Geolocator.getPositionStream(
+          locationSettings: locationSettings,
+        ).listen((Position position) {
+          if (!mounted) return;
+
+          setState(() => _currentPosition = position);
+
+          if (_officeLatitude != null && _officeLongitude != null) {
+            final distance = Geolocator.distanceBetween(
+              position.latitude,
+              position.longitude,
+              _officeLatitude!,
+              _officeLongitude!,
+            );
+
+            final stillInside = distance <= _allowedRadiusMeters;
+
+            if (!stillInside && _isInsideRadius) {
+              // User baru saja keluar radius saat proses berlangsung
+              setState(() {
+                _isInsideRadius = false;
+                _locationStatusMessage =
+                    "Kamu keluar dari radius kantor (${distance.toStringAsFixed(0)}m). Absensi dibatalkan.";
+              });
+              _showError(_locationStatusMessage);
+              _positionStream?.cancel();
+              Future.delayed(const Duration(seconds: 3), () {
+                if (mounted) Navigator.pop(context);
+              });
+            }
+          }
+        });
   }
 
   Future<void> _initCamera() async {
@@ -252,27 +312,7 @@ class _ScanScreenState extends State<ScanScreen> {
 
       if (hasFace && faces.isNotEmpty) {
         final face = faces.first;
-
-        // ── Deteksi kedipan mata ──
-        final leftEye = face.leftEyeOpenProbability ?? 1.0;
-        final rightEye = face.rightEyeOpenProbability ?? 1.0;
-
-        // Mata dianggap tertutup jika probabilitas terbuka < 0.3
-        final eyesClosed = leftEye < 0.3 && rightEye < 0.3;
-
-        if (eyesClosed && !_eyesWereClosed) {
-          // Mata baru saja menutup
-          _eyesWereClosed = true;
-        } else if (!eyesClosed && _eyesWereClosed) {
-          // Mata baru saja membuka → 1 kedipan terdeteksi
-          _eyesWereClosed = false;
-          _blinkCount++;
-          debugPrint('👁️ Kedipan terdeteksi: $_blinkCount');
-          if (_blinkCount >= _blinkThreshold) {
-            _livenessVerified = true;
-            debugPrint('✅ Liveness verified via kedipan mata');
-          }
-        }
+        _processLivenessStep(face);
       }
 
       if (mounted) {
@@ -280,16 +320,14 @@ class _ScanScreenState extends State<ScanScreen> {
           _faceDetected = hasFace;
           _stableFaceFrames = hasFace ? _stableFaceFrames + 1 : 0;
           if (!hasFace) {
-            _eyesWereClosed = false;
-            _blinkCount = 0;
-            _livenessVerified = false;
+            _resetLiveness();
           }
         });
       }
       // ── Hanya submit jika liveness verified ──
       if (hasFace &&
           _stableFaceFrames >= _stableFrameThreshold &&
-          // _livenessVerified && // ← tambahan pengecekan liveness
+          _livenessVerified &&
           !_isSubmitting &&
           !_autoSubmitTriggered) {
         _autoSubmitTriggered = true;
@@ -299,6 +337,64 @@ class _ScanScreenState extends State<ScanScreen> {
       debugPrint("Error deteksi wajah: $e");
     }
     _isBusy = false;
+  }
+
+  /// State machine liveness: blink -> turnLeft -> turnRight -> completed.
+  /// headEulerAngleY = yaw (geleng kiri/kanan), headEulerAngleX = pitch (angguk).
+  void _processLivenessStep(Face face) {
+    switch (_currentLivenessStep) {
+      case LivenessStep.blink:
+        final leftEye = face.leftEyeOpenProbability ?? 1.0;
+        final rightEye = face.rightEyeOpenProbability ?? 1.0;
+        final eyesClosed = leftEye < 0.3 && rightEye < 0.3;
+
+        if (eyesClosed && !_eyesWereClosed) {
+          _eyesWereClosed = true;
+        } else if (!eyesClosed && _eyesWereClosed) {
+          _eyesWereClosed = false;
+          _blinkCount++;
+          debugPrint('👁️ Kedipan terdeteksi: $_blinkCount');
+          if (_blinkCount >= _blinkThreshold) {
+            debugPrint('✅ Step blink selesai → lanjut turnLeft');
+            _currentLivenessStep = LivenessStep.turnLeft;
+          }
+        }
+        break;
+
+      case LivenessStep.turnLeft:
+        final yaw = face.headEulerAngleY ?? 0.0;
+        // Catatan: kamera depan mirrored, tanda (+/-) bisa terbalik di
+        // device tertentu — kalau kebalik, tukar tanda perbandingan di sini.
+        if (yaw <= -_headTurnThreshold) {
+          _headTurnLeftDone = true;
+          debugPrint('↩️ Geleng kiri terdeteksi (yaw: $yaw)');
+          _currentLivenessStep = LivenessStep.turnRight;
+        }
+        break;
+
+      case LivenessStep.turnRight:
+        final yaw = face.headEulerAngleY ?? 0.0;
+        if (yaw >= _headTurnThreshold) {
+          _headTurnRightDone = true;
+          debugPrint('↪️ Geleng kanan terdeteksi (yaw: $yaw)');
+          _currentLivenessStep = LivenessStep.completed;
+          _livenessVerified = true;
+          debugPrint('✅ Liveness verified (blink + head movement)');
+        }
+        break;
+
+      case LivenessStep.completed:
+        break;
+    }
+  }
+
+  void _resetLiveness() {
+    _currentLivenessStep = LivenessStep.blink;
+    _eyesWereClosed = false;
+    _blinkCount = 0;
+    _headTurnLeftDone = false;
+    _headTurnRightDone = false;
+    _livenessVerified = false;
   }
 
   Future<Position?> _determinePosition() async {
@@ -365,8 +461,7 @@ class _ScanScreenState extends State<ScanScreen> {
       );
 
       final currentEmbedding = _faceService.predict(capturedImage);
-      final isSame =
-          _faceService.isSameFace(storedEmbedding, currentEmbedding);
+      final isSame = _faceService.isSameFace(storedEmbedding, currentEmbedding);
       debugPrint(
         'Hasil verifikasi wajah: ${isSame ? "COCOK ✓" : "TIDAK COCOK ✗"}',
       );
@@ -575,6 +670,7 @@ class _ScanScreenState extends State<ScanScreen> {
 
   @override
   void dispose() {
+    _positionStream?.cancel();
     _controller?.stopImageStream();
     _controller?.dispose();
     _faceDetector.close();
@@ -667,9 +763,12 @@ class _ScanScreenState extends State<ScanScreen> {
     final String statusText = _isSubmitting
         ? "Memproses Absensi . . ."
         : _faceDetected
-        ? _livenessVerified
-              ? "Verifikasi berhasil, memproses..."
-              : "Kedipkan mata untuk verifikasi..."
+        ? switch (_currentLivenessStep) {
+            LivenessStep.blink => "Kedipkan mata untuk verifikasi...",
+            LivenessStep.turnLeft => "Sekarang, geleng kepala ke kiri...",
+            LivenessStep.turnRight => "Bagus! Sekarang geleng ke kanan...",
+            LivenessStep.completed => "Verifikasi berhasil, memproses...",
+          }
         : "Arahkan wajah ke bingkai";
 
     return Scaffold(
