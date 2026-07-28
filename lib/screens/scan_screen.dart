@@ -7,6 +7,8 @@ import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/face_recognition_service.dart';
+import '../services/verification_log_service.dart';
+import '../services/scenario_picker_dialog.dart';
 import '../utils/constants.dart';
 import '../utils/face_crop_utils.dart';
 import 'success_screen.dart';
@@ -41,6 +43,12 @@ class _ScanScreenState extends State<ScanScreen> {
 
   final FaceRecognitionService _faceService = FaceRecognitionService();
   bool _isFaceModelLoaded = false;
+
+  // ── BARU: untuk keperluan logging pengujian skripsi ──
+  final VerificationLogService _logService = VerificationLogService();
+  TestScenario? _selectedScenario;
+  final Stopwatch _verificationStopwatch = Stopwatch();
+  double _lastSimilarityScore = 0.0;
 
   bool _isBusy = false;
   bool _faceDetected = false;
@@ -283,6 +291,14 @@ class _ScanScreenState extends State<ScanScreen> {
 
       if (!mounted) return;
       setState(() => _isCameraInitialized = true);
+
+      // ── BARU: munculkan dialog pilih skenario pengujian ──
+      // (khusus masa pengumpulan data skripsi; bisa dihapus/disembunyikan
+      // nanti setelah masa pengujian selesai)
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        _selectedScenario = await showScenarioPickerDialog(context);
+      });
     } catch (e) {
       debugPrint("Gagal inisialisasi kamera: $e");
     }
@@ -462,6 +478,11 @@ class _ScanScreenState extends State<ScanScreen> {
 
       final currentEmbedding = _faceService.predict(capturedImage);
       final isSame = _faceService.isSameFace(storedEmbedding, currentEmbedding);
+
+      // ── BARU: simpan angka similarity mentah untuk logging ──
+      _lastSimilarityScore =
+          _faceService.getSimilarityScore(storedEmbedding, currentEmbedding);
+
       debugPrint(
         'Hasil verifikasi wajah: ${isSame ? "COCOK ✓" : "TIDAK COCOK ✗"}',
       );
@@ -470,6 +491,73 @@ class _ScanScreenState extends State<ScanScreen> {
       debugPrint('Error verifikasi wajah: $e');
       return FaceVerifyResult.skipped;
     }
+  }
+
+  /// Ambil tenantId & userId dari data user yang tersimpan di SharedPreferences
+  /// (disimpan saat login oleh AuthService sebagai JSON di bawah AppConstants.userKey).
+  ///
+  /// CATATAN: nama field company/tenant di bawah ini (company_id, tenant_id, dst)
+  /// masih tebakan berdasarkan pola umum. Cek hasil debugPrint('USER OBJECT: ...')
+  /// di terminal saat login untuk konfirmasi nama field yang benar, lalu sesuaikan
+  /// urutan pencarian di bawah kalau perlu.
+  Future<Map<String, String>> _getUserContext() async {
+    final prefs = await SharedPreferences.getInstance();
+    final userJson = prefs.getString(AppConstants.userKey);
+
+    if (userJson == null || userJson.isEmpty) {
+      return {'tenantId': 'unknown_tenant', 'userId': 'unknown_user'};
+    }
+
+    try {
+      final user = jsonDecode(userJson) as Map<String, dynamic>;
+
+      final userId = user['id']?.toString() ?? 'unknown_user';
+
+      final tenantId = user['company_id']?.toString() ??
+          user['tenant_id']?.toString() ??
+          (user['company'] is Map ? user['company']['id']?.toString() : null) ??
+          (user['tenant'] is Map ? user['tenant']['id']?.toString() : null) ??
+          'unknown_tenant';
+
+      return {'tenantId': tenantId, 'userId': userId};
+    } catch (e) {
+      debugPrint('Gagal parse user context untuk logging: $e');
+      return {'tenantId': 'unknown_tenant', 'userId': 'unknown_user'};
+    }
+  }
+
+  /// Simpan hasil percobaan ke log CSV lokal, khusus kalau sedang mode
+  /// pengujian (skenario sudah dipilih lewat dialog).
+  Future<void> _logTestResult(FaceVerifyResult result) async {
+    final context = await _getUserContext();
+    final tenantId = context['tenantId']!;
+    final userId = context['userId']!;
+
+    final attemptNumber = await _logService.getNextAttemptNumber(
+      tenantId: tenantId,
+      userId: userId,
+      scenario: _selectedScenario!.label,
+    );
+
+    await _logService.logVerification(
+      FaceVerificationLog(
+        tenantId: tenantId,
+        userId: userId,
+        scenario: _selectedScenario!.label,
+        attemptNumber: attemptNumber,
+        similarityScore: _lastSimilarityScore,
+        thresholdUsed: 0.45,
+        livenessPassed: _livenessVerified,
+        processingTimeMs: _verificationStopwatch.elapsedMilliseconds,
+        deviceModel:
+            '${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
+        timestamp: DateTime.now(),
+      ),
+    );
+
+    debugPrint(
+      '📝 Log tersimpan: tenant=$tenantId, user=$userId, scenario=${_selectedScenario!.label}, attempt=$attemptNumber, score=$_lastSimilarityScore',
+    );
   }
 
   Future<bool> _sendAttendance(XFile image, Position position) async {
@@ -490,6 +578,7 @@ class _ScanScreenState extends State<ScanScreen> {
     request.headers['Accept'] = 'application/json';
     request.fields['latitude'] = position.latitude.toString();
     request.fields['longitude'] = position.longitude.toString();
+    request.fields['accuracy'] = position.accuracy.toString();
     request.fields['face_verified'] = _faceDetected ? '1' : '0';
     request.files.add(await http.MultipartFile.fromPath('image', image.path));
 
@@ -579,7 +668,15 @@ class _ScanScreenState extends State<ScanScreen> {
       }
 
       // ── Verifikasi wajah: bedakan "belum registrasi" vs "tidak cocok" ──
+      _verificationStopwatch.reset();
+      _verificationStopwatch.start();
       final verifyResult = await _verifyFace(croppedFace);
+      _verificationStopwatch.stop();
+
+      // ── BARU: simpan hasil ke log kalau sedang mode testing ──
+      if (_selectedScenario != null) {
+        await _logTestResult(verifyResult);
+      }
 
       if (verifyResult == FaceVerifyResult.notRegistered ||
           verifyResult == FaceVerifyResult.mismatch) {

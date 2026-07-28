@@ -89,6 +89,13 @@ class FaceRecognitionService {
     return similarity >= threshold;
   }
 
+  // ── BARU: khusus untuk keperluan logging pengujian skripsi ──
+  // Mengembalikan angka similarity mentah (bukan cuma true/false),
+  // supaya bisa dicatat ke log CSV untuk dianalisis di BAB IV.
+  double getSimilarityScore(List<double> embedding1, List<double> embedding2) {
+    return cosineSimilarity(embedding1, embedding2);
+  }
+
   void dispose() {
     _interpreter?.close();
     _interpreter = null;
