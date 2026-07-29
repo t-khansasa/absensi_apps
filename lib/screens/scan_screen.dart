@@ -554,41 +554,48 @@ class _ScanScreenState extends State<ScanScreen> {
 
   // ── PERBAIKAN DI SINI: Menambahkan accuracy, accuracy_in, dan accuracy_out ──
   Future<bool> _sendAttendance(XFile image, Position position) async {
-    final prefs = await SharedPreferences.getInstance();
-    final token = prefs.getString(AppConstants.tokenKey);
+  final prefs = await SharedPreferences.getInstance();
+  final token = prefs.getString(AppConstants.tokenKey);
+  
+  if (token == null || token.isEmpty) {
+    _showError('Token tidak ditemukan. Silakan login ulang.');
+    return false;
+  }
 
-    if (token == null || token.isEmpty) {
-      _showError('Token tidak ditemukan. Silakan login ulang.');
-      return false;
-    }
+  final request = http.MultipartRequest(
+    'POST',
+    Uri.parse('${AppConstants.baseUrl}/attendance'),
+  );
+  
+  request.headers['Authorization'] = 'Bearer $token';
+  request.headers['Accept'] = 'application/json';
 
-    final request = http.MultipartRequest(
-      'POST',
-      Uri.parse('${AppConstants.baseUrl}/attendance'),
-    );
+  // Kirim data lokasi
+  request.fields['latitude'] = position.latitude.toString();
+  request.fields['longitude'] = position.longitude.toString();
+  
+  // ✅ PERBAIKAN: Hanya kirim 'accuracy' saja (backend akan handle)
+  request.fields['accuracy'] = position.accuracy.toString();
+  
+  // Verifikasi wajah
+  request.fields['face_verified'] = _faceDetected ? '1' : '0';
+  
+  // Attach foto
+  request.files.add(
+    await http.MultipartFile.fromPath('image', image.path)
+  );
 
-    request.headers['Authorization'] = 'Bearer $token';
-    request.headers['Accept'] = 'application/json';
-    
-    request.fields['latitude'] = position.latitude.toString();
-    request.fields['longitude'] = position.longitude.toString();
-    
-    // ✅ Mengirimkan nilai akurasi lokasi ke field accuracy_in dan accuracy_out
-    request.fields['accuracy'] = position.accuracy.toString();
-    request.fields['accuracy_in'] = position.accuracy.toString();
-    request.fields['accuracy_out'] = position.accuracy.toString();
-    
-    request.fields['face_verified'] = _faceDetected ? '1' : '0';
-    request.files.add(await http.MultipartFile.fromPath('image', image.path));
-
+  try {
     final streamedResponse = await request.send();
     final responseBody = await streamedResponse.stream.bytesToString();
 
-    if (streamedResponse.statusCode == 200 ||
+    if (streamedResponse.statusCode == 200 || 
         streamedResponse.statusCode == 201) {
+      debugPrint('✅ Attendance berhasil dikirim dengan accuracy: ${position.accuracy}');
       return true;
     }
 
+    // Handle error response
     String message = 'Gagal mengirim absensi.';
     try {
       final data = responseBody.isNotEmpty
@@ -600,14 +607,19 @@ class _ScanScreenState extends State<ScanScreen> {
     } catch (_) {
       if (responseBody.isNotEmpty) message = responseBody;
     }
-
+    
     _showError(message);
     return false;
+  } catch (e) {
+    debugPrint('❌ Error saat mengirim attendance: $e');
+    _showError('Gagal mengirimen absensi: $e');
+    return false;
   }
+}
 
   static Map<String, dynamic> _decodeJsonMap(String source) {
-    return Map<String, dynamic>.from(jsonDecode(source) as Map);
-  }
+  return Map<String, dynamic>.from(jsonDecode(source) as Map);
+}
 
   Future<void> _captureAndSubmit() async {
     if (_controller == null || _isSubmitting) return;
