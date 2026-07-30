@@ -1,24 +1,15 @@
-// verification_log_service.dart (VERSI UPDATE)
-//
-// Perubahan dari versi sebelumnya:
-// - Tambah field `scenario` (kondisi pengujian) dan `attemptNumber`
-// - Semua tetap tersimpan dalam 1 file CSV, tidak perlu pencatatan terpisah
-//
-// pubspec.yaml yang dibutuhkan (sama seperti sebelumnya):
-//   path_provider: ^2.1.5
-//   csv: ^6.0.0
-//   share_plus: ^7.2.2
 
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:csv/csv.dart';
 import 'package:share_plus/share_plus.dart';
 
-// Daftar skenario pengujian yang tersedia untuk dipilih user
 enum TestScenario {
   normal('normal'),
   cahayaRendah('cahaya_rendah'),
-  cahayaTerlaluTerang('cahaya_terlalu_terang');
+  cahayaTerlaluTerang('cahaya_terlalu_terang'),
+  pakaiMasker('pakai_masker'),
+  pakaiKacamata('pakai_kacamata');
 
   final String label;
   const TestScenario(this.label);
@@ -27,8 +18,8 @@ enum TestScenario {
 class FaceVerificationLog {
   final String tenantId;
   final String userId;
-  final String scenario;       // BARU
-  final int attemptNumber;     // BARU
+  final String scenario;
+  final int attemptNumber;
   final double similarityScore;
   final double thresholdUsed;
   final bool livenessPassed;
@@ -88,8 +79,6 @@ class VerificationLogService {
     return file;
   }
 
-  // Hitung otomatis attempt_number berikutnya untuk kombinasi
-  // user + tenant + scenario tertentu, supaya user tidak perlu input manual
   Future<int> getNextAttemptNumber({
     required String tenantId,
     required String userId,

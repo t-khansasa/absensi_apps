@@ -16,7 +16,7 @@ import 'dart:convert';
 import 'dart:io';
 
 /// Hasil verifikasi wajah, dipisah supaya pesan error ke user lebih akurat
-/// (membedakan "belum registrasi" vs "wajah tidak cocok").
+/// (membedakan "belum registrasi" vs "wajah tidak cocok" vs "gagal diproses").
 enum FaceVerifyResult { match, notRegistered, mismatch, skipped }
 
 /// Tahapan liveness detection: kedip mata -> geleng kiri -> geleng kanan -> selesai
@@ -44,7 +44,7 @@ class _ScanScreenState extends State<ScanScreen> {
   final FaceRecognitionService _faceService = FaceRecognitionService();
   bool _isFaceModelLoaded = false;
 
-  // ── BARU: untuk keperluan logging pengujian skripsi ──
+  // ── untuk keperluan logging pengujian skripsi ──
   final VerificationLogService _logService = VerificationLogService();
   TestScenario? _selectedScenario;
   final Stopwatch _verificationStopwatch = Stopwatch();
@@ -292,7 +292,7 @@ class _ScanScreenState extends State<ScanScreen> {
       if (!mounted) return;
       setState(() => _isCameraInitialized = true);
 
-      // ── BARU: munculkan dialog pilih skenario pengujian ──
+      // ── munculkan dialog pilih skenario pengujian ──
       // (khusus masa pengumpulan data skripsi; bisa dihapus/disembunyikan
       // nanti setelah masa pengujian selesai)
       WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -356,7 +356,12 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   /// State machine liveness: blink -> turnLeft -> turnRight -> completed.
-  /// headEulerAngleY = yaw (geleng kiri/kanan), headEulerAngleX = pitch (angguk).
+  /// headEulerAngleY = yaw (geleng kiri/kanan).
+  ///
+  /// CATATAN PERBAIKAN MIRROR: kamera depan pada device ini menghasilkan
+  /// nilai yaw terbalik dari asumsi awal (geleng kiri fisik menghasilkan
+  /// yaw positif, bukan negatif) — tanda perbandingan di kedua step di
+  /// bawah sudah ditukar untuk menyesuaikan.
   void _processLivenessStep(Face face) {
     switch (_currentLivenessStep) {
       case LivenessStep.blink:
@@ -379,9 +384,8 @@ class _ScanScreenState extends State<ScanScreen> {
 
       case LivenessStep.turnLeft:
         final yaw = face.headEulerAngleY ?? 0.0;
-        // Catatan: kamera depan mirrored, tanda (+/-) bisa terbalik di
-        // device tertentu — kalau kebalik, tukar tanda perbandingan di sini.
-        if (yaw <= -_headTurnThreshold) {
+        // Tanda ditukar (>= bukan <=) untuk mengoreksi mirror kamera depan.
+        if (yaw >= _headTurnThreshold) {
           _headTurnLeftDone = true;
           debugPrint('↩️ Geleng kiri terdeteksi (yaw: $yaw)');
           _currentLivenessStep = LivenessStep.turnRight;
@@ -390,7 +394,8 @@ class _ScanScreenState extends State<ScanScreen> {
 
       case LivenessStep.turnRight:
         final yaw = face.headEulerAngleY ?? 0.0;
-        if (yaw >= _headTurnThreshold) {
+        // Tanda ditukar (<= bukan >=) untuk mengoreksi mirror kamera depan.
+        if (yaw <= -_headTurnThreshold) {
           _headTurnRightDone = true;
           debugPrint('↪️ Geleng kanan terdeteksi (yaw: $yaw)');
           _currentLivenessStep = LivenessStep.completed;
@@ -438,7 +443,7 @@ class _ScanScreenState extends State<ScanScreen> {
 
   /// Verifikasi wajah hasil crop terhadap embedding tersimpan di server.
   /// Mengembalikan [FaceVerifyResult] supaya pemanggil bisa menampilkan
-  /// pesan yang akurat (belum registrasi vs tidak cocok vs match).
+  /// pesan yang akurat (belum registrasi vs tidak cocok vs match vs gagal proses).
   Future<FaceVerifyResult> _verifyFace(File capturedImage) async {
     if (!_isFaceModelLoaded) {
       debugPrint('Model belum load, skip verifikasi');
@@ -479,7 +484,7 @@ class _ScanScreenState extends State<ScanScreen> {
       final currentEmbedding = _faceService.predict(capturedImage);
       final isSame = _faceService.isSameFace(storedEmbedding, currentEmbedding);
 
-      // ── BARU: simpan angka similarity mentah untuk logging ──
+      // ── simpan angka similarity mentah untuk logging ──
       _lastSimilarityScore =
           _faceService.getSimilarityScore(storedEmbedding, currentEmbedding);
 
@@ -494,6 +499,11 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   /// Ambil tenantId & userId dari data user yang tersimpan di SharedPreferences
+  /// (disimpan saat login oleh AuthService sebagai JSON di bawah AppConstants.userKey).
+  ///
+  /// Catatan: field 'company' di data user berupa STRING nama perusahaan
+  /// (misal "PT. Surya Gaya Dharmaputra"), BUKAN ID numerik — sudah dikonfirmasi
+  /// dari hasil debugPrint('USER OBJECT: ...') saat login.
   Future<Map<String, String>> _getUserContext() async {
     final prefs = await SharedPreferences.getInstance();
     final userJson = prefs.getString(AppConstants.userKey);
@@ -552,50 +562,43 @@ class _ScanScreenState extends State<ScanScreen> {
     );
   }
 
-  // ── PERBAIKAN DI SINI: Menambahkan accuracy, accuracy_in, dan accuracy_out ──
+  // ── Mengirimkan accuracy, accuracy_in, dan accuracy_out ──
   Future<bool> _sendAttendance(XFile image, Position position) async {
-  final prefs = await SharedPreferences.getInstance();
-  final token = prefs.getString(AppConstants.tokenKey);
-  
-  if (token == null || token.isEmpty) {
-    _showError('Token tidak ditemukan. Silakan login ulang.');
-    return false;
-  }
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString(AppConstants.tokenKey);
 
-  final request = http.MultipartRequest(
-    'POST',
-    Uri.parse('${AppConstants.baseUrl}/attendance'),
-  );
-  
-  request.headers['Authorization'] = 'Bearer $token';
-  request.headers['Accept'] = 'application/json';
+    if (token == null || token.isEmpty) {
+      _showError('Token tidak ditemukan. Silakan login ulang.');
+      return false;
+    }
 
-  // Kirim data lokasi
-  request.fields['latitude'] = position.latitude.toString();
-  request.fields['longitude'] = position.longitude.toString();
-  
-  // ✅ PERBAIKAN: Hanya kirim 'accuracy' saja (backend akan handle)
-  request.fields['accuracy'] = position.accuracy.toString();
-  
-  // Verifikasi wajah
-  request.fields['face_verified'] = _faceDetected ? '1' : '0';
-  
-  // Attach foto
-  request.files.add(
-    await http.MultipartFile.fromPath('image', image.path)
-  );
+    final request = http.MultipartRequest(
+      'POST',
+      Uri.parse('${AppConstants.baseUrl}/attendance'),
+    );
 
-  try {
+    request.headers['Authorization'] = 'Bearer $token';
+    request.headers['Accept'] = 'application/json';
+
+    request.fields['latitude'] = position.latitude.toString();
+    request.fields['longitude'] = position.longitude.toString();
+
+    // Mengirimkan nilai akurasi GPS ke semua kunci parameter yang mungkin digunakan backend
+    request.fields['accuracy'] = position.accuracy.toString();
+    request.fields['accuracy_in'] = position.accuracy.toString();
+    request.fields['accuracy_out'] = position.accuracy.toString();
+
+    request.fields['face_verified'] = _faceDetected ? '1' : '0';
+    request.files.add(await http.MultipartFile.fromPath('image', image.path));
+
     final streamedResponse = await request.send();
     final responseBody = await streamedResponse.stream.bytesToString();
 
-    if (streamedResponse.statusCode == 200 || 
+    if (streamedResponse.statusCode == 200 ||
         streamedResponse.statusCode == 201) {
-      debugPrint('✅ Attendance berhasil dikirim dengan accuracy: ${position.accuracy}');
       return true;
     }
 
-    // Handle error response
     String message = 'Gagal mengirim absensi.';
     try {
       final data = responseBody.isNotEmpty
@@ -607,19 +610,14 @@ class _ScanScreenState extends State<ScanScreen> {
     } catch (_) {
       if (responseBody.isNotEmpty) message = responseBody;
     }
-    
+
     _showError(message);
     return false;
-  } catch (e) {
-    debugPrint('❌ Error saat mengirim attendance: $e');
-    _showError('Gagal mengirimen absensi: $e');
-    return false;
   }
-}
 
   static Map<String, dynamic> _decodeJsonMap(String source) {
-  return Map<String, dynamic>.from(jsonDecode(source) as Map);
-}
+    return Map<String, dynamic>.from(jsonDecode(source) as Map);
+  }
 
   Future<void> _captureAndSubmit() async {
     if (_controller == null || _isSubmitting) return;
@@ -678,24 +676,34 @@ class _ScanScreenState extends State<ScanScreen> {
         }
       }
 
-      // ── Verifikasi wajah: bedakan "belum registrasi" vs "tidak cocok" ──
+      // ── Verifikasi wajah: bedakan "belum registrasi" vs "tidak cocok" vs "gagal proses" ──
       _verificationStopwatch.reset();
       _verificationStopwatch.start();
       final verifyResult = await _verifyFace(croppedFace);
       _verificationStopwatch.stop();
 
-      // ── BARU: simpan hasil ke log kalau sedang mode testing ──
+      // ── simpan hasil ke log kalau sedang mode testing ──
       if (_selectedScenario != null) {
         await _logTestResult(verifyResult);
       }
 
+      // ── PERBAIKAN KEAMANAN: 'skipped' sekarang ikut diblokir ──
+      // Sebelumnya hanya notRegistered & mismatch yang diblokir, sehingga
+      // kegagalan proses verifikasi (koneksi timeout, response API gagal,
+      // dll) membuat absensi tetap lolos tanpa wajah benar-benar tercocokkan.
       if (verifyResult == FaceVerifyResult.notRegistered ||
-          verifyResult == FaceVerifyResult.mismatch) {
+          verifyResult == FaceVerifyResult.mismatch ||
+          verifyResult == FaceVerifyResult.skipped) {
         if (!mounted) return;
 
-        final message = verifyResult == FaceVerifyResult.notRegistered
-            ? 'Wajah belum terdaftar! Silakan registrasi wajah terlebih dahulu.'
-            : 'Wajah tidak dikenali! Pastikan wajah kamu sesuai dengan yang terdaftar.';
+        final message = switch (verifyResult) {
+          FaceVerifyResult.notRegistered =>
+            'Wajah belum terdaftar! Silakan registrasi wajah terlebih dahulu.',
+          FaceVerifyResult.mismatch =>
+            'Wajah tidak dikenali! Pastikan wajah kamu sesuai dengan yang terdaftar.',
+          _ =>
+            'Verifikasi wajah gagal diproses. Periksa koneksi internet dan coba lagi.',
+        };
 
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -707,6 +715,26 @@ class _ScanScreenState extends State<ScanScreen> {
 
         // Tunggu snackbar selesai lalu auto kembali ke beranda
         await Future.delayed(const Duration(seconds: 4));
+        if (!mounted) return;
+        Navigator.pop(context);
+        return;
+      }
+
+      // ── MODE TESTING: kalau skenario dipilih, cukup verifikasi + logging,
+      // TIDAK submit absensi sungguhan — supaya tidak kena batas 2x/hari
+      // (absen masuk & pulang) dan tidak mengotori data presensi asli tenant.
+      if (_selectedScenario != null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            backgroundColor: Colors.blue,
+            content: Text(
+              'Mode testing: verifikasi selesai, absensi tidak disubmit.',
+            ),
+            duration: Duration(seconds: 2),
+          ),
+        );
+        await Future.delayed(const Duration(seconds: 2));
         if (!mounted) return;
         Navigator.pop(context);
         return;
@@ -779,7 +807,9 @@ class _ScanScreenState extends State<ScanScreen> {
   @override
   void dispose() {
     _positionStream?.cancel();
-    _controller?.stopImageStream();
+    if (_controller != null && _controller!.value.isStreamingImages) {
+      _controller!.stopImageStream();
+    }
     _controller?.dispose();
     _faceDetector.close();
     _faceService.dispose();
