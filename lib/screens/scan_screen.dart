@@ -79,6 +79,7 @@ class _ScanScreenState extends State<ScanScreen> {
   double? _officeLatitude;
   double? _officeLongitude;
   double _allowedRadiusMeters = 100.0;
+  bool _isTestingMode = false;
 
   Position? _currentPosition;
 
@@ -131,11 +132,13 @@ class _ScanScreenState extends State<ScanScreen> {
             final lat = double.tryParse(office['latitude']?.toString() ?? '');
             final lng = double.tryParse(office['longitude']?.toString() ?? '');
             final radius = double.tryParse(office['radius']?.toString() ?? '');
+            final testingMode = office['is_testing_mode'];
 
             if (lat != null && lng != null) {
               _officeLatitude = lat;
               _officeLongitude = lng;
               _allowedRadiusMeters = radius ?? 100.0;
+              _isTestingMode = testingMode == true || testingMode == 1 || testingMode == '1';
             }
           }
         }
@@ -182,6 +185,22 @@ class _ScanScreenState extends State<ScanScreen> {
         _isInsideRadius = true;
         _locationStatusMessage =
             "Lokasi kantor tidak tersedia, absensi diizinkan.";
+      });
+      await _initCamera();
+      _startPositionStream();
+      return;
+    }
+
+    // ── Mode Testing: skip pengecekan radius di sisi HP sepenuhnya.
+    // Biarkan request selalu diteruskan ke backend, karena backend yang
+    // akan menghitung effective_radius & mencatat hasilnya (diterima/ditolak)
+    // ke tabel tolerance_coefficient_tests. ──
+    if (_isTestingMode) {
+      if (!mounted) return;
+      setState(() {
+        _isCheckingLocation = false;
+        _isInsideRadius = true;
+        _locationStatusMessage = "Mode Testing aktif \u2014 lanjut ke backend.";
       });
       await _initCamera();
       _startPositionStream();
@@ -236,7 +255,7 @@ class _ScanScreenState extends State<ScanScreen> {
 
           setState(() => _currentPosition = position);
 
-          if (_officeLatitude != null && _officeLongitude != null) {
+          if (!_isTestingMode && _officeLatitude != null && _officeLongitude != null) {
             final distance = Geolocator.distanceBetween(
               position.latitude,
               position.longitude,
@@ -657,7 +676,7 @@ class _ScanScreenState extends State<ScanScreen> {
 
       if (mounted) setState(() => _currentPosition = position);
 
-      if (_officeLatitude != null && _officeLongitude != null) {
+      if (!_isTestingMode && _officeLatitude != null && _officeLongitude != null) {
         final distance = Geolocator.distanceBetween(
           position.latitude,
           position.longitude,
