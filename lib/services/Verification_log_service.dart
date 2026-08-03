@@ -1,3 +1,9 @@
+// verification_log_service.dart (VERSI FINAL — logging lokal CSV saja, 5 skenario)
+//
+// pubspec.yaml yang dibutuhkan:
+//   path_provider: ^2.1.5
+//   csv: ^6.0.0
+//   share_plus: ^7.2.2
 
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
@@ -86,7 +92,11 @@ class VerificationLogService {
   }) async {
     final file = await _getLogFile();
     final content = await file.readAsString();
-    final rows = const CsvToListConverter().convert(content);
+    // eol diset eksplisit ke '\n' supaya cocok dengan format yang dipakai
+    // saat menulis baris (rowCsv + '\n') — tanpa ini, parser bisa gagal
+    // memisahkan baris dengan benar sehingga penghitungan attempt_number
+    // selalu keliru (selalu dianggap percobaan pertama).
+    final rows = const CsvToListConverter(eol: '\n').convert(content);
 
     int count = 0;
     for (final row in rows.skip(1)) {
