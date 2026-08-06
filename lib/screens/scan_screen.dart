@@ -191,19 +191,22 @@ class _ScanScreenState extends State<ScanScreen> {
       return;
     }
 
-    // ── Mode Testing: skip pengecekan radius di sisi HP sepenuhnya.
-    // Biarkan request selalu diteruskan ke backend, karena backend yang
-    // akan menghitung effective_radius & mencatat hasilnya (diterima/ditolak)
-    // ke tabel tolerance_coefficient_tests. ──
+    // ── Mode Testing: skip pengecekan radius DAN kamera/wajah di sisi HP
+    // sepenuhnya. Kamera nggak pernah dinyalain, jadi liveness & face
+    // verification nggak jadi penghalang. Cukup kirim koordinat + akurasi
+    // GPS langsung ke backend, yang akan menghitung effective_radius &
+    // mencatat hasilnya (diterima/ditolak) ke tabel tolerance_coefficient_tests.
+    // Ini penting supaya tester nggak perlu jadi user terdaftar dengan wajah
+    // ter-enroll — siapapun bisa dipakai sebagai partisipan uji titik. ──
     if (_isTestingMode) {
       if (!mounted) return;
       setState(() {
         _isCheckingLocation = false;
         _isInsideRadius = true;
-        _locationStatusMessage = "Mode Testing aktif \u2014 lanjut ke backend.";
+        _locationStatusMessage =
+            "Mode Testing aktif \u2014 mengirim lokasi langsung ke backend.";
       });
-      await _initCamera();
-      _startPositionStream();
+      await _submitTestingAttendance(position);
       return;
     }
 
@@ -636,6 +639,65 @@ class _ScanScreenState extends State<ScanScreen> {
 
   static Map<String, dynamic> _decodeJsonMap(String source) {
     return Map<String, dynamic>.from(jsonDecode(source) as Map);
+  }
+
+  /// Khusus mode testing (is_testing_mode aktif di kantor): kirim koordinat
+  /// + akurasi GPS langsung ke backend TANPA kamera, TANPA liveness, TANPA
+  /// verifikasi wajah. Backend sudah didesain menerima request testing_mode
+  /// tanpa field 'image' sama sekali, jadi partisipan siapapun (nggak harus
+  /// user dengan wajah ter-enroll) bisa dipakai buat uji titik geofencing.
+  Future<void> _submitTestingAttendance(Position position) async {
+    if (!mounted) return;
+    setState(() => _isSubmitting = true);
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString(AppConstants.tokenKey);
+
+      if (token == null || token.isEmpty) {
+        _showError('Token tidak ditemukan. Silakan login ulang.');
+        return;
+      }
+
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('${AppConstants.baseUrl}/attendance'),
+      );
+      request.headers['Authorization'] = 'Bearer $token';
+      request.headers['Accept'] = 'application/json';
+      request.fields['latitude'] = position.latitude.toString();
+      request.fields['longitude'] = position.longitude.toString();
+      request.fields['accuracy'] = position.accuracy.toString();
+      // Sengaja tidak melampirkan 'image' — testing_mode di backend
+      // sudah nullable untuk field ini.
+
+      final streamedResponse = await request.send();
+      final responseBody = await streamedResponse.stream.bytesToString();
+
+      String message = 'Testing selesai.';
+      try {
+        final data = responseBody.isNotEmpty
+            ? Map<String, dynamic>.from(
+                await compute(_decodeJsonMap, responseBody),
+              )
+            : <String, dynamic>{};
+        message = data['message']?.toString() ?? message;
+      } catch (_) {
+        if (responseBody.isNotEmpty) message = responseBody;
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(backgroundColor: Colors.blue, content: Text(message)),
+      );
+      await Future.delayed(const Duration(seconds: 2));
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      _showError('Gagal mengirim data testing: $e');
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
   }
 
   Future<void> _captureAndSubmit() async {
