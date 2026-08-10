@@ -44,7 +44,7 @@ class _ScanScreenState extends State<ScanScreen> {
   final FaceRecognitionService _faceService = FaceRecognitionService();
   bool _isFaceModelLoaded = false;
 
-  // ── untuk keperluan logging pengujian skripsi ──
+  // ── untuk keperluan logging pengujian skripsi (frontend: face recognition) ──
   final VerificationLogService _logService = VerificationLogService();
   TestScenario? _selectedScenario;
   final Stopwatch _verificationStopwatch = Stopwatch();
@@ -79,6 +79,8 @@ class _ScanScreenState extends State<ScanScreen> {
   double? _officeLatitude;
   double? _officeLongitude;
   double _allowedRadiusMeters = 100.0;
+
+  // ── milik teman (backend): mode testing khusus geofencing ──
   bool _isTestingMode = false;
 
   Position? _currentPosition;
@@ -191,13 +193,12 @@ class _ScanScreenState extends State<ScanScreen> {
       return;
     }
 
-    // ── Mode Testing: skip pengecekan radius DAN kamera/wajah di sisi HP
-    // sepenuhnya. Kamera nggak pernah dinyalain, jadi liveness & face
-    // verification nggak jadi penghalang. Cukup kirim koordinat + akurasi
-    // GPS langsung ke backend, yang akan menghitung effective_radius &
-    // mencatat hasilnya (diterima/ditolak) ke tabel tolerance_coefficient_tests.
-    // Ini penting supaya tester nggak perlu jadi user terdaftar dengan wajah
-    // ter-enroll — siapapun bisa dipakai sebagai partisipan uji titik. ──
+    // ── Mode Testing (geofencing, milik backend teman): skip kamera & wajah
+    // sepenuhnya, kirim koordinat langsung ke backend untuk uji titik radius.
+    // CATATAN PENTING: kalau flag ini aktif untuk suatu kantor, testing
+    // face recognition (dialog skenario) TIDAK akan pernah muncul di kantor
+    // itu karena fungsi ini return lebih dulu. Pastikan koordinasi dengan
+    // rekan tim soal kantor mana yang sedang dipakai untuk testing apa. ──
     if (_isTestingMode) {
       if (!mounted) return;
       setState(() {
@@ -314,7 +315,7 @@ class _ScanScreenState extends State<ScanScreen> {
       if (!mounted) return;
       setState(() => _isCameraInitialized = true);
 
-      // ── munculkan dialog pilih skenario pengujian ──
+      // ── munculkan dialog pilih skenario pengujian (face recognition) ──
       // (khusus masa pengumpulan data skripsi; bisa dihapus/disembunyikan
       // nanti setelah masa pengujian selesai)
       WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -585,7 +586,11 @@ class _ScanScreenState extends State<ScanScreen> {
   }
 
   // ── Mengirimkan accuracy, accuracy_in, dan accuracy_out ──
-  Future<bool> _sendAttendance(XFile image, Position position) async {
+  // PERBAIKAN: menerima File (croppedFace hasil crop), BUKAN foto mentah,
+  // supaya tidak melebihi limit ukuran upload di server (lihat riwayat bug
+  // "Foto wajah wajib diisi untuk presensi" yang ternyata karena foto
+  // mentah terlalu besar dan di-drop diam-diam oleh server).
+  Future<bool> _sendAttendance(File image, Position position) async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString(AppConstants.tokenKey);
 
@@ -641,11 +646,9 @@ class _ScanScreenState extends State<ScanScreen> {
     return Map<String, dynamic>.from(jsonDecode(source) as Map);
   }
 
-  /// Khusus mode testing (is_testing_mode aktif di kantor): kirim koordinat
-  /// + akurasi GPS langsung ke backend TANPA kamera, TANPA liveness, TANPA
-  /// verifikasi wajah. Backend sudah didesain menerima request testing_mode
-  /// tanpa field 'image' sama sekali, jadi partisipan siapapun (nggak harus
-  /// user dengan wajah ter-enroll) bisa dipakai buat uji titik geofencing.
+  /// Khusus mode testing (is_testing_mode aktif di kantor, dikerjakan teman
+  /// untuk keperluan geofencing): kirim koordinat + akurasi GPS langsung ke
+  /// backend TANPA kamera, TANPA liveness, TANPA verifikasi wajah.
   Future<void> _submitTestingAttendance(Position position) async {
     if (!mounted) return;
     setState(() => _isSubmitting = true);
@@ -763,7 +766,7 @@ class _ScanScreenState extends State<ScanScreen> {
       final verifyResult = await _verifyFace(croppedFace);
       _verificationStopwatch.stop();
 
-      // ── simpan hasil ke log kalau sedang mode testing ──
+      // ── simpan hasil ke log kalau sedang mode testing (face recognition) ──
       if (_selectedScenario != null) {
         await _logTestResult(verifyResult);
       }
@@ -801,9 +804,9 @@ class _ScanScreenState extends State<ScanScreen> {
         return;
       }
 
-      // ── MODE TESTING: kalau skenario dipilih, cukup verifikasi + logging,
-      // TIDAK submit absensi sungguhan — supaya tidak kena batas 2x/hari
-      // (absen masuk & pulang) dan tidak mengotori data presensi asli tenant.
+      // ── MODE TESTING (face recognition): kalau skenario dipilih, cukup
+      // verifikasi + logging, TIDAK submit absensi sungguhan — supaya tidak
+      // kena batas 2x/hari dan tidak mengotori data presensi asli tenant.
       if (_selectedScenario != null) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -821,7 +824,10 @@ class _ScanScreenState extends State<ScanScreen> {
         return;
       }
 
-      final success = await _sendAttendance(image, position);
+      // ── PERBAIKAN: kirim croppedFace (hasil crop, ukuran kecil), bukan
+      // `image` mentah dari kamera — mencegah bug "Foto wajah wajib diisi"
+      // akibat ukuran file mentah melebihi limit upload server.
+      final success = await _sendAttendance(croppedFace, position);
       if (!mounted) return;
 
       if (success) {
